@@ -352,7 +352,6 @@ cc_library(
         "//tsl/platform:regexp",
         "//tsl/profiler/protobuf:xplane_proto_cc",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/types:optional",
     ],
 )
 
@@ -363,6 +362,8 @@ tsl_cc_test(
         ":tpu_xplane_utils",
         ":xplane_schema",
         ":xplane_utils",
+        ":xplane_visitor",
+        "//testing/base/public:gunit_main",
         "//tsl/platform:test",
         "//tsl/platform:test_main",
         "//tsl/profiler/protobuf:xplane_proto_cc",
