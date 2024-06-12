@@ -1,4 +1,4 @@
-/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2024 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,23 +12,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_LITE_STDERR_REPORTER_H_
-#define TENSORFLOW_LITE_STDERR_REPORTER_H_
 
-#include <cstdarg>
+#include "xla/python/ifrt/device_allocation.h"
 
-#include "tensorflow/lite/core/api/error_reporter.h"
+namespace xla {
+namespace ifrt {
 
-namespace tflite {
+char DeviceAllocation::ID = 0;
 
-// An error reporter that simply writes the message to stderr.
-struct StderrReporter : public ErrorReporter {
-  int Report(const char* format, va_list args) override;
-};
-
-// Return the default error reporter (output to stderr).
-ErrorReporter* DefaultErrorReporter();
-
-}  // namespace tflite
-
-#endif  // TENSORFLOW_LITE_STDERR_REPORTER_H_
+}  // namespace ifrt
+}  // namespace xla
