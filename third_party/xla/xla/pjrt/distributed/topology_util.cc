@@ -174,7 +174,10 @@ absl::Status ExchangeTopologies(std::string_view platform, int node_id,
     LocalTopologyProto* topology = global_topology->add_nodes();
     *topology = local_topology;
     for (DeviceProto& device : *topology->mutable_devices()) {
-      device.set_global_device_id(device.local_device_ordinal());
+      // If global device id is unset, overwrite with local device ordinal.
+      if (device.global_device_id() == 0) {
+        device.set_global_device_id(device.local_device_ordinal());
+      }
     }
     return absl::OkStatus();
   }
