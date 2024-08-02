@@ -164,6 +164,11 @@ class GpuPriorityFusionQueue {
       instructions.push_back(instruction);
     }
 
+    for (auto instruction : computation->MakeInstructionPostOrder()) {
+      if (instruction->IsFusible()) {
+        UpdatePerformanceModelCache(instruction);
+      }
+    }
     ComputeAndSetPriorities(instructions);
   }
 
@@ -247,12 +252,43 @@ class GpuPriorityFusionQueue {
     return !current_consumers_.empty();
   }
 
+  void UpdatePerformanceModelCache(HloInstruction* producer) {
+    if (producer->opcode() == HloOpcode::kBitcast ||
+        producer->opcode() == HloOpcode::kConstant || !IsFusible(*producer)) {
+      return;
+    }
+
+    for (auto consumer : producer->users()) {
+      if (!IsFusible(*consumer)) return;
+    }
+
+    auto config = GpuPerformanceModelOptions::PriorityFusion(
+        &fusion_analysis_cache_, &gpu_performance_model_cache_);
+
+    if (!gpu_performance_model_cache_.Get(*producer)) {
+      auto runtime_data = GpuPerformanceModel::EstimateRunTimeForInstruction(
+          producer, *device_info_, &cost_analysis_, config);
+      gpu_performance_model_cache_.Set(*producer, runtime_data);
+    }
+
+    for (auto consumer : producer->users()) {
+      if (!gpu_performance_model_cache_.Get(*consumer)) {
+        auto runtime_data = GpuPerformanceModel::EstimateRunTimeForInstruction(
+            consumer, *device_info_, &cost_analysis_, config);
+        gpu_performance_model_cache_.Set(*consumer, runtime_data);
+      }
+    }
+  }
+
   // Update priorities of all affected ops.
   void UpdatePriorities() {
     // Revisit costs of all updated ops. It's important to update cost analysis
     // before recalculating priorities.
     for (auto instruction : to_update_priority_) {
       TF_CHECK_OK(cost_analysis_.RevisitInstruction(instruction));
+    }
+    for (auto producer : to_update_priority_) {
+      UpdatePerformanceModelCache(producer);
     }
 
     ComputeAndSetPriorities(std::vector<HloInstruction*>{
@@ -550,7 +586,6 @@ class GpuPriorityFusionQueue {
         return it->second;
       }
     }
-
     auto fusion_decision = CanFuse(producer, consumer);
 
     // The lock is required, because writing to a flat_hash_map is not
