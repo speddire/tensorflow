@@ -154,6 +154,10 @@ class BFloat16Propagation : public HloModulePass {
   // by the given HLO.
   void AdjustCalledComputationRoot(HloInstruction* hlo);
 
+  // Ensures that a host offloading copy (from device to host or from host to
+  // device) does not simultaneously change type.
+  void ResolveChangeOfPrecisionDuringHostOffloadingCopy();
+
   // ***************************
   // Functions called after changes in changes_to_bf16_ are applied.
 

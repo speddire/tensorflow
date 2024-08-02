@@ -15,10 +15,16 @@ limitations under the License.
 
 #include "xla/service/bfloat16_propagation.h"
 
+#include <cstdint>
+#include <utility>
+#include <vector>
+
 #include "absl/algorithm/container.h"
 #include "absl/cleanup/cleanup.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_format.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_module.h"
@@ -32,6 +38,31 @@ limitations under the License.
 #include "tsl/platform/logging.h"
 
 namespace xla {
+
+namespace {
+
+bool IsHostOffloadingCopy(const HloInstruction* instruction) {
+  // TODO(b/357893656): Move this function into a utilities file.
+  if (instruction->opcode() != HloOpcode::kCopy) {
+    return false;
+  }
+  const HloInstruction* operand = instruction->operand(0);
+  CHECK(instruction->shape().has_layout()) << absl::StreamFormat(
+      "Cannot determine if copy \"%s\" is a host offloading copy if it does "
+      "not have a layout.",
+      instruction->name());
+  CHECK(operand->shape().has_layout()) << absl::StreamFormat(
+      "Cannot determine if operand \"%s\" is a host offloading copy if it does "
+      "not have a layout.",
+      operand->name());
+  int64_t input_memory_space = operand->shape().layout().memory_space();
+  int64_t output_memory_space = instruction->shape().layout().memory_space();
+  return input_memory_space != output_memory_space &&
+         (input_memory_space == Layout::kHostMemorySpace ||
+          output_memory_space == Layout::kHostMemorySpace);
+}
+
+}  // namespace
 
 BFloat16Propagation::BFloat16Propagation(const FloatSupport* bfloat16_support)
     : bfloat16_support_(bfloat16_support) {
@@ -564,6 +595,41 @@ void BFloat16Propagation::AdjustCalledComputationRoot(HloInstruction* hlo) {
   }
 }
 
+void BFloat16Propagation::ResolveChangeOfPrecisionDuringHostOffloadingCopy() {
+  std::vector<std::pair<HloInstruction*, ShapeIndex>> instructions_to_revert;
+  auto add_instruction_to_revert_list =
+      [&](HloInstruction* instruction,
+          const absl::flat_hash_map<Shape*, ShapeIndex>& shape_map) {
+        for (const auto& shape_index_pair : shape_map) {
+          instructions_to_revert.push_back(
+              std::make_pair(instruction, shape_index_pair.second));
+        }
+      };
+  for (auto it = changes_to_bf16_.begin(); it != changes_to_bf16_.end(); ++it) {
+    HloInstruction* instruction = it->first;
+    // Check for host offloading copies which convert to BF16.
+    if (IsHostOffloadingCopy(instruction) &&
+        !changes_to_bf16_.contains(instruction->operand(0))) {
+      // If a host offloading copy's type is changed, but its operand is not,
+      // then we need to revert the change.
+      add_instruction_to_revert_list(instruction, it->second);
+    }
+    // Check for host offloading copies which convert from BF16.
+    for (HloInstruction* user : instruction->users()) {
+      if (IsHostOffloadingCopy(user) && !changes_to_bf16_.contains(user)) {
+        // If the input to a host offloading copy is changed to bf16, but the
+        // copy itself is not, then we need to revert the change.
+        add_instruction_to_revert_list(instruction, it->second);
+      }
+    }
+  }
+  for (const std::pair<HloInstruction*, ShapeIndex>& instruction_and_shape :
+       instructions_to_revert) {
+    AddToOrRemoveFromBF16ChangeSet(instruction_and_shape.first,
+                                   instruction_and_shape.second, F32);
+  }
+}
+
 bool BFloat16Propagation::ResolveInconsistencyOfAliasingBuffersHelper(
     HloComputation* computation,
     absl::flat_hash_set<const HloComputation*>* visited_computations) {
@@ -577,7 +643,7 @@ bool BFloat16Propagation::ResolveInconsistencyOfAliasingBuffersHelper(
       auto hlo = *inst_it;
       auto adjust_hlo_output = [&](const Shape& /* subshape */,
                                    const ShapeIndex& index) {
-        auto output_type = OutputTypeAfterChange(hlo, index);
+        const PrimitiveType output_type = OutputTypeAfterChange(hlo, index);
         VLOG(2) << "output_type is " << ((output_type == BF16) ? "BF16" : "F32")
                 << " for :" << hlo->ToString() << "\n";
         if (output_type != F32 && output_type != BF16) {
@@ -913,6 +979,10 @@ absl::StatusOr<bool> BFloat16Propagation::Run(
   // defining instruction's shape has changed. So we need to adjust the output
   // shapes of instructions according to the HLO values they refer to.
   ResolveInconsistencyOfAliasingBuffers(module, execution_threads);
+
+  // We might have propagated type changes partially over a host offloading
+  // copy. Revert such cases.
+  ResolveChangeOfPrecisionDuringHostOffloadingCopy();
 
   // Apply the changes in changes_to_bf16_.
   for (auto& change : changes_to_bf16_) {
