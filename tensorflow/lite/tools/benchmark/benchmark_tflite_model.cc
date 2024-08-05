@@ -37,6 +37,9 @@ limitations under the License.
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "ruy/profiler/profiler.h"  // from @ruy
+#include "tensorflow/core/example/example.pb.h"
+#include "tensorflow/core/example/feature.pb.h"
+#include "tensorflow/core/example/feature_util.h"
 #include "tensorflow/lite/core/c/c_api_types.h"
 #include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/core/kernels/register.h"
@@ -153,17 +156,43 @@ class OutputSaver : public BenchmarkListener {
   }
 
   void OnBenchmarkEnd(const BenchmarkResults& results) override {
-    std::string path = params_->Get<std::string>("output_filepath");
-    if (path.empty()) return;
-
-    std::ofstream ofs(path, std::ofstream::out);
-    if (ofs.good()) {
-      for (int i = 0; i < interpreter_runner_->outputs().size(); i++) {
-        int tensor_index = interpreter_runner_->outputs()[i];
-        ofs.write(interpreter_runner_->tensor(tensor_index)->data.raw,
-                  interpreter_runner_->tensor(tensor_index)->bytes);
+    // If the output_filepath is specified, save the output tensors to the file.
+    const std::string path = params_->Get<std::string>("output_filepath");
+    if (!path.empty()) {
+      std::ofstream ofs(path, std::ofstream::out);
+      if (ofs.good()) {
+        for (int i = 0; i < interpreter_runner_->outputs().size(); i++) {
+          int tensor_index = interpreter_runner_->outputs()[i];
+          ofs.write(interpreter_runner_->tensor(tensor_index)->data.raw,
+                    interpreter_runner_->tensor(tensor_index)->bytes);
+        }
+        ofs.close();
       }
-      ofs.close();
+    }
+
+    // If the output_proto_filepath is specified, save the output tensors as
+    // tensorflow::Example proto and serialize it to the file.
+    const std::string output_proto_path =
+        params_->Get<std::string>("output_proto_filepath");
+    if (!output_proto_path.empty()) {
+      tensorflow::Example example;
+      for (int i = 0; i < interpreter_runner_->outputs().size(); i++) {
+        const int tensor_index = interpreter_runner_->outputs()[i];
+        const TfLiteTensor& tensor =
+            *(interpreter_runner_->tensor(tensor_index));
+        std::vector<float> float_list;
+        const TfLiteStatus status =
+            utils::TfLiteTensorToFloatArray(tensor, float_list);
+        // Save the output tensors in tf example if its type is supported.
+        if (status == kTfLiteOk) {
+          tensorflow::SetFeatureValues(float_list, tensor.name, &example);
+        }
+      }
+      std::ofstream ofs(output_proto_path, std::ios::out | std::ios::binary);
+      if (ofs.good()) {
+        example.SerializeToOstream(&ofs);
+        ofs.close();
+      }
     }
   }
 
@@ -518,6 +547,8 @@ BenchmarkParams BenchmarkTfLiteModel::DefaultParams() {
                           BenchmarkParam::Create<bool>(false));
   default_params.AddParam("output_filepath",
                           BenchmarkParam::Create<std::string>(""));
+  default_params.AddParam("output_proto_filepath",
+                          BenchmarkParam::Create<std::string>(""));
 
   default_params.AddParam("tensor_name_display_length",
                           BenchmarkParam::Create<int32_t>(25));
@@ -622,6 +653,9 @@ std::vector<Flag> BenchmarkTfLiteModel::GetFlags() {
       CreateFlag<std::string>(
           "output_filepath", &params_,
           "File path to export outputs layer as binary data."),
+      CreateFlag<std::string>(
+          "output_proto_filepath", &params_,
+          "File path to export outputs layer as tf example proto."),
       CreateFlag<int32_t>(
           "tensor_name_display_length", &params_,
           "The number of characters to show for the tensor's name when "
@@ -700,6 +734,9 @@ void BenchmarkTfLiteModel::LogParams() {
                       "Constant CAST output cache", verbose);
   LOG_BENCHMARK_PARAM(std::string, "output_filepath",
                       "File path to export outputs layer to", verbose);
+  LOG_BENCHMARK_PARAM(std::string, "output_proto_filepath",
+                      "File path to export outputs layer as tf example to",
+                      verbose);
   LOG_BENCHMARK_PARAM(int32_t, "tensor_name_display_length",
                       "Tensor name display length", verbose);
   LOG_BENCHMARK_PARAM(int32_t, "tensor_type_display_length",

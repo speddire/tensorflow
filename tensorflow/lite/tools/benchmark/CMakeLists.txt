@@ -22,6 +22,7 @@ populate_source_vars("${TFLITE_SOURCE_DIR}/tools/benchmark"
 )
 list(APPEND TFLITE_BENCHMARK_SRCS
   ${XLA_SOURCE_DIR}/xla/tsl/util/stats_calculator.cc
+  ${TF_SOURCE_DIR}/core/example/feature_util.cc
   ${TFLITE_SOURCE_DIR}/kernels/internal/utils/sparsity_format_converter.cc
   ${TFLITE_SOURCE_DIR}/profiling/memory_info.cc
   ${TFLITE_SOURCE_DIR}/profiling/memory_usage_monitor.cc
@@ -47,6 +48,8 @@ list(APPEND TFLITE_BENCHMARK_LIBS
 
 list(APPEND TFLITE_BENCHMARK_LIBS
   profiling_info_proto
+  feature_proto
+  example_proto
   protobuf::libprotobuf
 )
 
