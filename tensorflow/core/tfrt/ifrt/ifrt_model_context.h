@@ -27,6 +27,7 @@ limitations under the License.
 #include "xla/python/ifrt/client.h"
 #include "xla/python/ifrt/topology.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
+#include "tensorflow/core/tfrt/ifrt/checkpoint_loader_interface.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_executable_registry.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_loaded_variable_registry.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_restore_tensor_registry.h"
@@ -110,6 +111,15 @@ class IfrtModelContext {
     return ifrt_serving_core_selector_;
   }
 
+  void set_checkpoint_loader(
+      std::unique_ptr<CheckpointLoaderInterface> loader) {
+    checkpoint_loader_ = std::move(loader);
+  }
+
+  CheckpointLoaderInterface* GetCheckpointLoader() const {
+    return checkpoint_loader_.get();
+  }
+
   tfrt::ConcurrentWorkQueue* checkpoint_loader_queue() const {
     return checkpoint_loader_queue_;
   }
@@ -153,6 +163,7 @@ class IfrtModelContext {
 
   IfrtLoadedVariableRegistry loaded_variable_registry_;
   IfrtRestoreTensorRegistry restore_tensor_registry_;
+  std::unique_ptr<CheckpointLoaderInterface> checkpoint_loader_ = nullptr;
   bool frozen_ = false;
 };
 

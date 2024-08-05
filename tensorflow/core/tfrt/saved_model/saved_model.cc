@@ -16,13 +16,11 @@ limitations under the License.
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -70,6 +68,8 @@ limitations under the License.
 #include "tensorflow/core/tfrt/graph_executor/export_mlir.h"
 #include "tensorflow/core/tfrt/graph_executor/graph_execution_options.h"
 #include "tensorflow/core/tfrt/graph_executor/graph_executor.h"
+#include "tensorflow/core/tfrt/ifrt/checkpoint_loader_interface.h"
+#include "tensorflow/core/tfrt/ifrt/ifrt_model_context.h"
 #include "tensorflow/core/tfrt/mlrt/bytecode/bytecode.h"
 #include "tensorflow/core/tfrt/mlrt/bytecode/executable.h"
 #include "tensorflow/core/tfrt/mlrt/interpreter/context.h"
@@ -133,6 +133,36 @@ auto* saved_model_input_spec_validation_failure =
     tensorflow::monitoring::Gauge<bool, 1>::New(
         "/tensorflow/tfrt/saved_model/input_spec_validation_failure",
         "Record the models that failed input spec validation.", "model_name");
+
+absl::Status PrepareRestore(
+    mlir::MLIRContext* context, ModelRuntimeContext* model_runtime_context,
+    const tensorflow::MetaGraphDef& meta_graph_def,
+    FallbackState& fallback_state, const std::string& saved_model_dir,
+    const SavedModel::Options& options,
+    ifrt_serving::IfrtModelContext* ifrt_model_context) {
+  // Import the global MLIR with `import_user_signatures` as true so that we can
+  // analysis the global MLIR to retrieve data needed for restore.
+  mlir::OwningOpRef<mlir::ModuleOp> mlir_module_restore_analysis;
+  ASSIGN_OR_RETURN_IN_IMPORT(
+      mlir_module_restore_analysis,
+      ImportSavedModel(
+          context, meta_graph_def, fallback_state, saved_model_dir,
+          /*import_user_signatures=*/true,
+          options.graph_execution_options.run_placer_grappler_on_functions));
+
+  ifrt_serving::CheckpointLoaderInterface* checkpoint_loader =
+      ifrt_model_context->GetCheckpointLoader();
+
+  if (!checkpoint_loader) {
+    return absl::InternalError("Missing checkpoint loader.");
+  }
+
+  TF_RETURN_IF_ERROR(checkpoint_loader->PrepareRestore(
+      std::move(mlir_module_restore_analysis)));
+
+  LOG(INFO) << "Complete set restore metadata.";
+  return absl::OkStatus();
+}
 
 tensorflow::Status RunBytecodeInitializers(
     const GraphExecutionOptions& options,
@@ -594,6 +624,19 @@ absl::StatusOr<std::unique_ptr<SavedModel>> SavedModelImpl::LoadSavedModel(
     // since meta_graph_def will be moved.
     model_context.set_graph_def(nullptr);
     model_context.set_callable_options(nullptr);
+  }
+
+  if (options.graph_execution_options.use_ifrt) {
+    std::optional<ifrt_serving::IfrtModelContext*> ifrt_model_context =
+        model_context.resource_context()
+            .GetResource<ifrt_serving::IfrtModelContext>(
+                ifrt_serving::kIfrtModelContextName);
+    if (!ifrt_model_context.has_value()) {
+      return absl::InternalError("IfrtModelContext was not found.");
+    }
+    TF_RETURN_IF_ERROR(PrepareRestore(
+        &context, &model_context, meta_graph_def, *fallback_state,
+        std::string(saved_model_dir), options, *ifrt_model_context));
   }
 
   GetDefaultInputValue(meta_graph_def.signature_def(), model_context,

@@ -42,6 +42,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/platform/protobuf.h"  // IWYU pragma: keep
 #include "tensorflow/core/tfrt/fallback/op_kernel_runner.h"
+#include "tensorflow/core/tfrt/ifrt/checkpoint_loader_interface.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_config.pb.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_loaded_variable_utils.h"
 #include "tensorflow/core/tfrt/ifrt/ifrt_model_context.h"
@@ -52,7 +53,6 @@ limitations under the License.
 #include "tensorflow/core/tfrt/mlrt/kernel/context.h"
 #include "tensorflow/core/tfrt/mlrt/kernel/kernel.h"
 #include "tensorflow/core/tfrt/mlrt/kernel/kernel_runner_utils.h"
-#include "tensorflow/core/tfrt/mlrt/kernel/shard_restore_util.h"
 #include "tensorflow/core/tfrt/utils/fallback_tensor.h"
 #include "tsl/platform/errors.h"
 #include "tsl/platform/statusor.h"
@@ -398,65 +398,24 @@ absl::Status MlrtIfrtRestoreVariableKernel::ValidateInput() {
 }
 
 absl::Status MlrtIfrtRestoreVariableKernel::InvokeHelper() {
+  std::optional<IfrtModelContext*> ifrt_model_context =
+      context().resource_context().GetResource<IfrtModelContext>(
+          "IfrtModelContext");
+  if (!ifrt_model_context.has_value()) {
+    return absl::FailedPreconditionError(
+        "RestoreVariableOp: failed to fetch IfrtModelContext");
+  }
   TF_RETURN_IF_ERROR(ValidateInput());
 
-  std::vector<int64_t> variable_sizes;
-  variable_sizes.reserve(var_handles().size());
-  for (auto& handle : var_handles()) {
-    variable_sizes.push_back(GetSizeFromVarHandle(
-        handle.tensor().scalar<tensorflow::ResourceHandle>()()));
+  ifrt_serving::CheckpointLoaderInterface* checkpoint_loader =
+      (*ifrt_model_context)->GetCheckpointLoader();
+
+  if (checkpoint_loader == nullptr) {
+    return absl::InternalError("Missing CheckpointLoader.");
   }
-
-  std::vector<std::vector<int>> sharded_indices =
-      ShardVariables(kNumRestoreClusters, absl::MakeSpan(variable_sizes));
-
-  // Converts the names and slices back to the tensor.
-  auto vector_to_tensor = [](const std::vector<tsl::tstring>& vec) {
-    tensorflow::Tensor tensor(tensorflow::DT_STRING,
-                              TensorShape({static_cast<int>(vec.size())}));
-    for (int i = 0; i < vec.size(); ++i) {
-      tensor.flat<tsl::tstring>()(i) = vec[i];
-    }
-    return tensor;
-  };
-
-  const auto& tensor_names_flat = tensor_names().tensor().flat<tsl::tstring>();
-  const auto& shape_and_slices_flat =
-      shape_and_slices().tensor().flat<tsl::tstring>();
-
-  std::vector<RestoreVariableShard> shards;
-  shards.reserve(sharded_indices.size());
-  for (auto& sharded_index : sharded_indices) {
-    RestoreVariableShard shard;
-    shard.var_handles.reserve(sharded_index.size());
-    shard.truncate_in_cast.reserve(sharded_index.size());
-    shard.restored_dtypes.reserve(sharded_index.size());
-
-    std::vector<tsl::tstring> tensor_names;
-    std::vector<tsl::tstring> shape_and_slices;
-    shape_and_slices.reserve(sharded_index.size());
-    tensor_names.reserve(sharded_index.size());
-    for (int index : sharded_index) {
-      tensor_names.push_back(tensor_names_flat(index));
-      shape_and_slices.push_back(shape_and_slices_flat(index));
-      shard.dtypes_attr_value.mutable_list()->add_type(
-          restored_dtypes()[index]);
-
-      shard.var_handles.push_back(var_handles()[index]);
-      shard.restored_dtypes.push_back(restored_dtypes()[index]);
-      shard.truncate_in_cast.push_back(truncate_in_cast()[index]);
-    }
-
-    shard.prefix = prefix().tensor();
-    shard.tensor_names = vector_to_tensor(tensor_names);
-    shard.shape_and_slices = vector_to_tensor(shape_and_slices);
-    shards.push_back(std::move(shard));
-  }
-
-  for (const auto& shard : shards) {
-    TF_RETURN_IF_ERROR(RunShard(shard));
-  }
-  return absl::OkStatus();
+  return checkpoint_loader->Load(prefix(), var_handles(), tensor_names(),
+                                 shape_and_slices(), restored_dtypes(),
+                                 truncate_in_cast(), context());
 }
 
 class MlrtIfrtLoadVariableKernel : public mlrt::KernelFrame {

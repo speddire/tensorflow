@@ -231,6 +231,7 @@ cc_library(
     srcs = ["ifrt_model_context.cc"],
     hdrs = ["ifrt_model_context.h"],
     deps = [
+        ":checkpoint_loader_interface",
         ":ifrt_executable_registry",
         ":ifrt_loaded_variable_registry",
         ":ifrt_restore_tensor_registry",
@@ -597,5 +598,54 @@ tf_cc_test(
         "@tf_runtime//:test_kernels_alwayslink",
         "@tf_runtime//backends/cpu:core_runtime_alwayslink",
         "@tf_runtime//backends/cpu:tf_ops_alwayslink",
+    ],
+)
+
+cc_library(
+    name = "checkpoint_loader_interface",
+    hdrs = ["checkpoint_loader_interface.h"],
+    deps = [
+        "//tensorflow/core/tfrt/mlrt/bytecode",
+        "//tensorflow/core/tfrt/mlrt/kernel:context",
+        "//tensorflow/core/tfrt/utils:fallback_tensor",
+        "@com_google_absl//absl/status",
+        "@llvm-project//mlir:IR",
+    ],
+)
+
+cc_library(
+    name = "checkpoint_loader",
+    srcs = ["checkpoint_loader.cc"],
+    hdrs = ["checkpoint_loader.h"],
+    deps = [
+        ":checkpoint_loader_interface",
+        ":ifrt_loaded_variable_utils",
+        ":ifrt_model_context",
+        ":ifrt_restore_tensor_registry",
+        "//tensorflow/compiler/mlir/tfrt/transforms/ifrt:ifrt_types",
+        "//tensorflow/core:core_cpu_base",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:framework_types_hdr",
+        "//tensorflow/core/framework:attr_value_proto_cc",
+        "//tensorflow/core/framework:node_def_util",
+        "//tensorflow/core/framework:tensor",
+        "//tensorflow/core/tfrt/fallback:op_kernel_runner",
+        "//tensorflow/core/tfrt/mlrt/bytecode",
+        "//tensorflow/core/tfrt/mlrt/kernel:context",
+        "//tensorflow/core/tfrt/mlrt/kernel:kernel_runner_utils",
+        "//tensorflow/core/tfrt/mlrt/kernel:shard_restore_util",
+        "//tensorflow/core/tfrt/utils:fallback_tensor",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@llvm-project//mlir:IR",
+        "@local_tsl//tsl/platform:errors",
+        "@local_tsl//tsl/platform:statusor",
+        "@local_tsl//tsl/platform:tstring",
+        "@local_xla//xla/python/ifrt",
+        "@tf_runtime//:hostcontext",
     ],
 )
