@@ -155,6 +155,9 @@ void GetLoopBoundsFromIndexingMap(mlir::ImplicitLocOpBuilder& b,
                                   llvm::SmallVectorImpl<mlir::Value>* ubs,
                                   llvm::SmallVectorImpl<mlir::Value>* steps);
 
+// Returns true if there is a constraint on the given symbol.
+bool IsSymbolConstrained(const IndexingMap& map, int symbol_id);
+
 }  // namespace mlir_converter
 }  // namespace gpu
 }  // namespace xla

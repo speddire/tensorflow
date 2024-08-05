@@ -1514,7 +1514,6 @@ absl::Status SubgraphToMlirFunction(
   return absl::OkStatus();
 }
 
-namespace {
 
 bool IsSymbolConstrained(const IndexingMap& map, int symbol_id) {
   for (const auto& [expr, _] : map.GetConstraints()) {
@@ -1529,6 +1528,8 @@ bool IsSymbolConstrained(const IndexingMap& map, int symbol_id) {
   }
   return false;
 }
+
+namespace {
 
 ValueRange EmitLoopNestImpl(
     ImplicitLocOpBuilder& b, ValueRange dim_values, ValueRange iter_args_inits,
