@@ -49,6 +49,116 @@ namespace mlir {
 namespace odml {
 namespace {
 
+bool IsSign(APInt a, APInt sign) {
+  if (a.isZero()) return a == sign;
+  if (a.isNegative()) return sign == -1;
+  return sign == 1;
+}
+
+bool IsSign(APFloat a, APFloat sign) {
+  if (a.isNaN() || a.isZero()) return a == sign;
+  if (a.isNegative()) return sign.isExactlyValue(-1.0);
+  return sign.isExactlyValue(1.0);
+}
+
+bool IsDenseSplatIntAttr(ElementsAttr float_or_int) {
+  return mlir::isa<SplatElementsAttr>(float_or_int) &&
+         mlir::isa<DenseIntElementsAttr>(float_or_int);
+}
+
+bool IsDenseSplatFloatAttr(ElementsAttr float_or_int) {
+  return mlir::isa<SplatElementsAttr>(float_or_int) &&
+         mlir::isa<DenseFPElementsAttr>(float_or_int);
+}
+
+bool ValueEquals(ElementsAttr float_or_int, double rhs) {
+  if (IsDenseSplatFloatAttr(float_or_int)) {
+    return mlir::cast<SplatElementsAttr>(float_or_int)
+        .getSplatValue<APFloat>()
+        .isExactlyValue(rhs);
+  } else if (IsDenseSplatIntAttr(float_or_int)) {
+    return mlir::cast<SplatElementsAttr>(float_or_int).getSplatValue<APInt>() ==
+           static_cast<int>(rhs);
+  }
+  return false;
+}
+
+// Returns whether the splat constant is the sign of the int or float Tensor.
+bool TensorIsSign(PatternRewriter& rewriter, ElementsAttr float_or_int,
+                  ElementsAttr sgn_cst) {
+  auto sgn_splat = llvm::dyn_cast<SplatElementsAttr>(sgn_cst);
+  if (!sgn_splat) return false;
+
+  auto splat = dyn_cast<SplatElementsAttr>(float_or_int);
+  if (auto float_spl = llvm::dyn_cast_if_present<FloatAttr>(splat),
+      sgn_cst_spl = llvm::dyn_cast_if_present<FloatAttr>(sgn_splat);
+      float_spl && sgn_cst_spl) {
+    return IsSign(float_spl.getValue(), sgn_cst_spl.getValue());
+  }
+  if (auto int_spl = llvm::dyn_cast_if_present<IntegerAttr>(splat),
+      sgn_cst_spl = llvm::dyn_cast_if_present<IntegerAttr>(sgn_splat);
+      int_spl && sgn_cst_spl) {
+    return IsSign(int_spl.getValue(), sgn_cst_spl.getValue());
+  }
+  if (mlir::isa<DenseFPElementsAttr>(float_or_int)) {
+    auto sgn_splat_value = sgn_splat.getSplatValue<APFloat>();
+    return llvm::all_of(float_or_int.getValues<APFloat>(), [&](APFloat value) {
+      return IsSign(value, sgn_splat_value);
+    });
+  }
+  if (mlir::isa<DenseIntElementsAttr>(float_or_int)) {
+    auto sgn_splat_value = sgn_splat.getSplatValue<APInt>();
+    return llvm::all_of(float_or_int.getValues<APInt>(), [&](APInt value) {
+      return IsSign(value, sgn_splat_value);
+    });
+  }
+  return false;
+}
+
+bool SameTypeOrDefaultCompare(mhlo::ComparisonTypeAttr comparison_type_attr,
+                              ElementsAttr cst) {
+  if (!comparison_type_attr) return true;
+  auto comparison_type_attr_value = comparison_type_attr.getValue();
+  if (comparison_type_attr_value == mhlo::ComparisonType::FLOAT &&
+      IsDenseSplatFloatAttr(cst)) {
+    return true;
+  }
+  if ((comparison_type_attr_value == mhlo::ComparisonType::SIGNED ||
+       comparison_type_attr_value == mhlo::ComparisonType::UNSIGNED) &&
+      IsDenseSplatIntAttr(cst)) {
+    return true;
+  }
+  return false;
+}
+
+bool ValueIsReciprocal(ElementsAttr float_or_int, ElementsAttr rhs) {
+  if (IsDenseSplatFloatAttr(float_or_int) &&
+      IsDenseSplatFloatAttr(float_or_int)) {
+    return (mlir::cast<SplatElementsAttr>(float_or_int)
+                .getSplatValue<APFloat>() *
+            mlir::cast<SplatElementsAttr>(rhs).getSplatValue<APFloat>())
+        .isExactlyValue(1.0);
+  } else if (IsDenseSplatIntAttr(float_or_int) &&
+             IsDenseSplatIntAttr(float_or_int)) {
+    return (mlir::cast<SplatElementsAttr>(float_or_int).getSplatValue<APInt>() *
+            mlir::cast<SplatElementsAttr>(rhs).getSplatValue<APInt>()) == 1;
+  }
+  return false;
+}
+
+bool ValueGreaterThanZero(ElementsAttr float_or_int) {
+  if (IsDenseSplatIntAttr(float_or_int)) {
+    auto value =
+        mlir::cast<SplatElementsAttr>(float_or_int).getSplatValue<APInt>();
+    return !value.isNegative() && !value.isZero();
+  } else if (IsDenseSplatFloatAttr(float_or_int)) {
+    auto value =
+        mlir::cast<SplatElementsAttr>(float_or_int).getSplatValue<APFloat>();
+    return !value.isNaN() && !value.isNegative() && !value.isZero();
+  }
+  return false;
+}
+
 #define GEN_PASS_DEF_LEGALIZEHLOTOTFLITEPASS
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/passes.h.inc"
 
@@ -64,6 +174,19 @@ std::optional<bool> IsCbrtLegal(mhlo::CbrtOp op) {
   return !op.getType().getElementType().isF32();
 }
 
+// Mark possible target ops from rounding patterns as having "unknown"
+// legality. This is required to schedule patterns on these ops even
+// though MhloDialect is explicitly marked legal (which cannot be changed
+// easily).
+void AddRoundingOpsAsUnknown(ConversionTarget& target) {
+  target.addDynamicallyLegalOp<mhlo::CompareOp, mhlo::FloorOp, mhlo::SubtractOp,
+                               mhlo::AndOp, mhlo::SelectOp, mhlo::RemOp,
+                               mhlo::AddOp, mhlo::SignOp, mhlo::MulOp,
+                               mhlo::DivOp, mhlo::OrOp, mhlo::BroadcastInDimOp,
+                               mhlo::ConstantOp, mhlo::RoundOp, mhlo::TupleOp>(
+      [](Operation* op) { return std::nullopt; });
+}
+
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/generated_tflite_legalize_hlo.inc"
 void LegalizeHloToTfLitePass::runOnOperation() {
   MLIRContext* context = &getContext();
@@ -76,7 +199,9 @@ void LegalizeHloToTfLitePass::runOnOperation() {
   target.addLegalOp<func::CallOp, func::ConstantOp, arith::ConstantOp>();
   target.addDynamicallyLegalOp<mhlo::CustomCallOp>(IsCustomCallLegal);
   target.addDynamicallyLegalOp<mhlo::CbrtOp>(IsCbrtLegal);
-  target.addIllegalOp<mhlo::DotGeneralOp, mhlo::DotOp, mhlo::TransposeOp>();
+  target.addIllegalOp<mhlo::DotOp, mhlo::DotGeneralOp, mhlo::TransposeOp>();
+
+  AddRoundingOpsAsUnknown(target);
 
   PopulatePadPatterns(context, patterns, target);
   PopulateReducePatterns(context, patterns, target);
@@ -87,6 +212,7 @@ void LegalizeHloToTfLitePass::runOnOperation() {
 
   if (failed(applyPartialConversion(getOperation(), target,
                                     std::move(patterns)))) {
+    getOperation()->dump();
     getOperation().emitError("mhlo to TFLite legalization failed.");
     signalPassFailure();
   }
