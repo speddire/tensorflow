@@ -35,3 +35,7 @@ def LowerCbrt : Pat<(MHLO_CbrtOp $opr),
       (Arith_ConstantOp ConstantAttr<RankedF32ElementsAttr<[]>, "3.0f">),
       TFL_AF_None)),
       [(F32Tensor $opr)]>;
+
+def : Pat<(MHLO_ShiftRightArithmeticOp $l, $r), (TFL_RightShiftOp $l, $r)>;
+def : Pat<(MHLO_ShiftRightLogicalOp $l, $r), (TFL_RightShiftOp $l, $r)>;
+def : Pat<(MHLO_RemOp $l, $r), (TFL_FloorModOp $l, $r)>;
