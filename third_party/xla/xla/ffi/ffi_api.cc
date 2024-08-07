@@ -21,6 +21,7 @@ limitations under the License.
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/base/optimization.h"
@@ -31,6 +32,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
+#include "xla/executable_run_options.h"
 #include "xla/ffi/api/api.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/c_api_internal.h"  // IWYU pragma: keep
@@ -56,10 +58,19 @@ struct XLA_FFI_Error {
 };
 
 struct XLA_FFI_ExecutionContext {
-  int32_t device_ordinal = -1;
+  struct CpuContext {
+    const Eigen::ThreadPoolDevice* intra_op_thread_pool = nullptr;
+  };
 
-  stream_executor::Stream* stream = nullptr;
-  stream_executor::DeviceMemoryAllocator* allocator = nullptr;
+  struct GpuContext {
+    stream_executor::Stream* stream = nullptr;
+    stream_executor::DeviceMemoryAllocator* allocator = nullptr;
+  };
+
+  using BackendContext = std::variant<CpuContext, GpuContext>;
+
+  int32_t device_ordinal = -1;
+  BackendContext backend_context = {};
 
   const xla::HloComputation* called_computation = nullptr;
   const xla::ffi::ExecutionContext* execution_context = nullptr;
@@ -76,10 +87,22 @@ bool IsCommandBufferCompatible(XLA_FFI_Handler_Traits traits) {
 
 static XLA_FFI_ExecutionContext CreateExecutionContext(
     const CallOptions& options) {
+  using BackendContext = XLA_FFI_ExecutionContext::BackendContext;
+
+  // Converts CallOptions to corresponding backend context.
+  struct BackendVisitor {
+    BackendContext operator()(const CallOptions::CpuOptions& options) const {
+      return XLA_FFI_ExecutionContext::CpuContext{options.intra_op_thread_pool};
+    }
+    BackendContext operator()(const CallOptions::GpuOptions& options) const {
+      return XLA_FFI_ExecutionContext::GpuContext{options.stream,
+                                                  options.allocator};
+    }
+  };
+
   return XLA_FFI_ExecutionContext{
       options.device_ordinal,
-      options.stream,
-      options.allocator,
+      std::visit(BackendVisitor{}, options.backend_options),
       options.called_computation,
       internal::ScopedExecutionContext::GetCallExecutionContext(options),
       options.execution_state,
@@ -376,12 +399,20 @@ static XLA_FFI_Error* XLA_FFI_Stream_Get(XLA_FFI_Stream_Get_Args* args) {
       "XLA_FFI_Stream_Get", XLA_FFI_Stream_Get_Args_STRUCT_SIZE,
       args->struct_size));
 
-  if (args->ctx->stream == nullptr) {
+  auto* gpu = std::get_if<XLA_FFI_ExecutionContext::GpuContext>(
+      &args->ctx->backend_context);
+
+  if (gpu == nullptr) {
     return new XLA_FFI_Error{
-        InvalidArgument("XLA FFI stream is not available")};
+        InvalidArgument("XLA FFI GPU context is not available")};
   }
 
-  auto handle = args->ctx->stream->platform_specific_handle();
+  if (gpu->stream == nullptr) {
+    return new XLA_FFI_Error{
+        InvalidArgument("XLA FFI GPU stream is not available")};
+  }
+
+  auto handle = gpu->stream->platform_specific_handle();
   args->stream = handle.stream;
 
   return nullptr;
@@ -459,6 +490,17 @@ static XLA_FFI_Error* XLA_FFI_DeviceMemory_Allocate(
       "XLA_FFI_DeviceMemory_Allocate_Args",
       XLA_FFI_DeviceMemory_Allocate_Args_STRUCT_SIZE, args->struct_size));
 
+  auto* gpu = std::get_if<XLA_FFI_ExecutionContext::GpuContext>(
+      &args->ctx->backend_context);
+
+  // TODO(ezhulenev): Device memory allocation should be supported for all
+  // backends, not just GPU, although for CPU it doesn't make much sense, as
+  // plain `new` is sufficient.
+  if (gpu == nullptr) {
+    return new XLA_FFI_Error{
+        InvalidArgument("XLA FFI GPU context is not available")};
+  }
+
   // TODO(ezhulenev): We happen to have the same alignment requirement for
   // device memory on CPU and GPU backends, but instead of hardcoding it here
   // we should query it for the platform XLA FFI handler is registered with.
@@ -471,7 +513,7 @@ static XLA_FFI_Error* XLA_FFI_DeviceMemory_Allocate(
   }
 
   absl::StatusOr<stream_executor::OwningDeviceMemory> memory =
-      args->ctx->allocator->Allocate(args->ctx->device_ordinal, args->size);
+      gpu->allocator->Allocate(args->ctx->device_ordinal, args->size);
   if (!memory.ok()) {
     return new XLA_FFI_Error{std::move(memory).status()};
   }
@@ -486,7 +528,18 @@ static XLA_FFI_Error* XLA_FFI_DeviceMemory_Free(
       "XLA_FFI_DeviceMemory_Free_Args",
       XLA_FFI_DeviceMemory_Free_Args_STRUCT_SIZE, args->struct_size));
 
-  absl::Status status = args->ctx->allocator->Deallocate(
+  auto* gpu = std::get_if<XLA_FFI_ExecutionContext::GpuContext>(
+      &args->ctx->backend_context);
+
+  // TODO(ezhulenev): Device memory allocation should be supported for all
+  // backends, not just GPU, although for CPU it doesn't make much sense, as
+  // plain `new` is sufficient.
+  if (gpu == nullptr) {
+    return new XLA_FFI_Error{
+        InvalidArgument("XLA FFI GPU context is not available")};
+  }
+
+  absl::Status status = gpu->allocator->Deallocate(
       args->ctx->device_ordinal,
       stream_executor::DeviceMemoryBase(args->data, args->size));
   if (!status.ok()) {
@@ -509,7 +562,13 @@ static XLA_FFI_Error* XLA_FFI_INTERNAL_Error_Forward(void* status) {
 }
 
 static void* XLA_FFI_INTERNAL_Stream_Get(XLA_FFI_ExecutionContext* ctx) {
-  return ctx->stream;
+  if (auto* gpu = std::get_if<XLA_FFI_ExecutionContext::GpuContext>(
+          &ctx->backend_context)) {
+    return gpu->stream;
+  }
+
+  return new XLA_FFI_Error{
+      InvalidArgument("XLA FFI GPU context is not available")};
 }
 
 static int32_t XLA_FFI_INTERNAL_DeviceOrdinal_Get(
@@ -519,7 +578,13 @@ static int32_t XLA_FFI_INTERNAL_DeviceOrdinal_Get(
 
 static void* XLA_FFI_INTERNAL_DeviceMemoryAllocator_Get(
     XLA_FFI_ExecutionContext* ctx) {
-  return ctx->allocator;
+  if (auto* gpu = std::get_if<XLA_FFI_ExecutionContext::GpuContext>(
+          &ctx->backend_context)) {
+    return gpu->allocator;
+  }
+
+  return new XLA_FFI_Error{
+      InvalidArgument("XLA FFI GPU context is not available")};
 }
 
 static void* XLA_FFI_INTERNAL_CalledComputation_Get(
