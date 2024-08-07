@@ -1975,3 +1975,28 @@ func.func @sort_to_topk_const(%arg0: tensor<3x6xf32>) -> (tensor<3x6xf32>, tenso
 // CHECK: %cst = arith.constant dense<6> : tensor<i32>
 // CHECK: %values, %indices = "tfl.topk_v2"(%arg0, %cst) : (tensor<3x6xf32>, tensor<i32>) -> (tensor<3x6xf32>, tensor<3x6xi32>
 
+// -----
+
+//===----------------------------------------------------------------------===//
+// mhlo.if
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: if
+func.func @if(%arg0: tensor<i1>) -> (tensor<i32>) {
+  %cst_0 = arith.constant dense<0> : tensor<i32>
+  %cst_1 = arith.constant dense<1000> : tensor<i32>
+  %1 = "mhlo.if"(%arg0) ({
+    "mhlo.return"(%cst_0) : (tensor<i32>) -> ()
+  }, {
+    "mhlo.return"(%cst_1) : (tensor<i32>) -> ()
+  }) : (tensor<i1>) -> tensor<i32>
+  func.return %1: tensor<i32>
+}
+
+// CHECK: %[[CST:.*]] = arith.constant dense<0> : tensor<i32>
+// CHECK: %[[CST:.*]] = arith.constant dense<1000> : tensor<i32>
+// CHECK: %[[VAL_0:.*]] = "tfl.if"(%arg0) ({
+// CHECK    "tfl.yield"(%[[CST]]) : (tensor<i32>) -> ()
+// CHECK  }, {
+// CHECK    "tfl.yield"(%[[CST_0]]) : (tensor<i32>) -> ()
+// CHECK  }) : (tensor<i1>) -> tensor<i32>
