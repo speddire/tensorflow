@@ -35,3 +35,50 @@ def LowerCbrt : Pat<(MHLO_CbrtOp $opr),
       (Arith_ConstantOp ConstantAttr<RankedF32ElementsAttr<[]>, "3.0f">),
       TFL_AF_None)),
       [(F32Tensor $opr)]>;
+
+//===----------------------------------------------------------------------===//
+// Unary op patterns.
+//===----------------------------------------------------------------------===//
+
+foreach Mapping = [[MHLO_AbsOp, TFL_AbsOp],
+                   [MHLO_BitcastConvertOp, TFL_BitcastOp],
+                   [MHLO_CeilOp, TFL_CeilOp],
+                   [MHLO_CosineOp, TFL_CosOp],
+                   [MHLO_ExpOp, TFL_ExpOp],
+                   [MHLO_FloorOp, TFL_FloorOp],
+                   [MHLO_ImagOp, TFL_ImagOp],
+                   [MHLO_LogOp, TFL_LogOp],
+                   [MHLO_LogisticOp, TFL_LogisticOp],
+                   [MHLO_NegOp, TFL_NegOp],
+                   [MHLO_RealOp, TFL_RealOp],
+                   [MHLO_RsqrtOp, TFL_RsqrtOp],
+                   [MHLO_SineOp, TFL_SinOp],
+                   [MHLO_SignOp, TFL_SignOp],
+                   [MHLO_SqrtOp, TFL_SqrtOp],
+                   [MHLO_TanhOp, TFL_TanhOp]] in
+  def : Pat<(Mapping[0] F32Tensor:$input), (Mapping[1] $input)>;
+
+def : Pat<(MHLO_ConvertOp $input), (TFL_CastOp $input)>;
+
+def : Pat<(MHLO_Expm1Op F32Tensor:$x),
+            (TFL_SubOp
+              (TFL_ExpOp $x),
+              (Arith_ConstantOp
+                ConstantAttr<RankedF32ElementsAttr<[]>, "1.0f">),
+              TFL_AF_None)>;
+
+def : Pat<(MHLO_IsFiniteOp F32Tensor:$x),
+                       (TFL_EqualOp
+                          (TFL_SubOp $x, $x, TFL_AF_None),
+                          (Arith_ConstantOp
+                            ConstantAttr<RankedF32ElementsAttr<[]>, "0.0f">))>;
+
+def : Pat<(MHLO_Log1pOp F32Tensor:$x),
+                      (TFL_LogOp
+                        (TFL_AddOp
+                          $x,
+                          (Arith_ConstantOp
+                            ConstantAttr<RankedF32ElementsAttr<[]>, "1.0f">),
+                          TFL_AF_None))>;
+
+

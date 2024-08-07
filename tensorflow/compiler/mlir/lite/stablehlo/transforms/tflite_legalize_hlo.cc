@@ -65,6 +65,20 @@ std::optional<bool> IsCbrtLegal(mhlo::CbrtOp op) {
   return !op.getType().getElementType().isF32();
 }
 
+void SetUnaryOpLegal(ConversionTarget& target) {
+  auto is_legal = [](Operation* op) {
+    return !llvm::cast<ShapedType>(op->getOperand(0).getType())
+                .getElementType()
+                .isIntOrFloat();
+  };
+  target.addDynamicallyLegalOp<
+      mhlo::AbsOp, mhlo::BitcastConvertOp, mhlo::CeilOp, mhlo::IsFiniteOp,
+      mhlo::CosineOp, mhlo::ExpOp, mhlo::Expm1Op, mhlo::FloorOp, mhlo::ImagOp,
+      mhlo::LogOp, mhlo::NegOp, mhlo::RealOp, mhlo::Log1pOp, mhlo::RsqrtOp,
+      mhlo::SineOp, mhlo::LogisticOp, mhlo::SignOp, mhlo::SqrtOp, mhlo::TanhOp,
+      mhlo::ConvertOp>(is_legal);
+}
+
 #include "tensorflow/compiler/mlir/lite/stablehlo/transforms/generated_tflite_legalize_hlo.inc"
 void LegalizeHloToTfLitePass::runOnOperation() {
   MLIRContext* context = &getContext();
@@ -78,6 +92,8 @@ void LegalizeHloToTfLitePass::runOnOperation() {
   target.addDynamicallyLegalOp<mhlo::CustomCallOp>(IsCustomCallLegal);
   target.addDynamicallyLegalOp<mhlo::CbrtOp>(IsCbrtLegal);
   target.addIllegalOp<mhlo::DotGeneralOp, mhlo::DotOp, mhlo::TransposeOp>();
+
+  SetUnaryOpLegal(target);
 
   PopulatePadPatterns(context, patterns, target);
   PopulateReducePatterns(context, patterns, target);
