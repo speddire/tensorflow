@@ -18,7 +18,8 @@ limitations under the License.
 
 #include <Python.h>
 
-#include "third_party/nanobind/include/nanobind/nanobind.h"
+#include "absl/strings/str_format.h"
+#include "nanobind/nanobind.h"
 
 namespace xla {
 
@@ -30,12 +31,28 @@ Py_hash_t nb_hash(nanobind::handle o);
 // TODO(phawkins): consider upstreaming this to nanobind.
 bool nb_isinstance(nanobind::handle inst, nanobind::handle cls);
 
+// Issues a Python deprecation warning. Throws a C++ exception if issuing the
+// Python warning causes a Python exception to be raised.
+template <typename... Args>
+void PythonDeprecationWarning(int stacklevel,
+                              const absl::FormatSpec<Args...>& format,
+                              const Args&... args) {
+  if (PyErr_WarnEx(PyExc_DeprecationWarning,
+                   absl::StrFormat(format, args...).c_str(), stacklevel) < 0) {
+    throw nanobind::python_error();
+  }
+}
+
 // Variant of NB_TYPE_CASTER that doesn't define from_cpp()
 #define NB_TYPE_CASTER_FROM_PYTHON_ONLY(Value_, descr)   \
   using Value = Value_;                                  \
   static constexpr auto Name = descr;                    \
   template <typename T_>                                 \
   using Cast = movable_cast_t<T_>;                       \
+  template <typename T_>                                 \
+  static constexpr bool can_cast() {                     \
+    return true;                                         \
+  }                                                      \
   explicit operator Value*() { return &value; }          \
   explicit operator Value&() { return (Value&)value; }   \
   explicit operator Value&&() { return (Value&&)value; } \

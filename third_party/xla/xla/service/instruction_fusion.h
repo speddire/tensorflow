@@ -23,6 +23,12 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "xla/service/hlo_module_config.h"
+#include "tsl/platform/macros.h"
 // The source_location.h is not available in open source.
 #if defined(PLATFORM_GOOGLE)
 #include "absl/types/source_location.h"
@@ -166,8 +172,9 @@ class InstructionFusion : public HloModulePass {
                                             const HloInstruction* consumer);
 
  protected:
-  // Returns a list of computations on which Fusion is performed.
-  virtual std::vector<HloComputation*> GetFusionComputations(
+  // Returns a list of computations that are not fusion computations. These
+  // computations contain instructions which are candidates for fusions.
+  virtual std::vector<HloComputation*> GetNonFusionComputations(
       HloModule* module,
       const absl::flat_hash_set<absl::string_view>& execution_threads);
 

@@ -16,36 +16,50 @@ limitations under the License.
 #include <utility>
 
 #include "llvm/ADT/SmallVector.h"
-#include "mlir/Dialect/Arith/IR/Arith.h"  // from @llvm-project
-#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
-#include "mlir/Dialect/GPU/IR/GPUDialect.h"  // from @llvm-project
-#include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
-#include "mlir/Dialect/LLVMIR/LLVMTypes.h"  // from @llvm-project
-#include "mlir/Dialect/SCF/IR/SCF.h"  // from @llvm-project
-#include "mlir/Dialect/Tensor/IR/Tensor.h"  // from @llvm-project
-#include "mlir/IR/Builders.h"  // from @llvm-project
-#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
-#include "mlir/IR/ImplicitLocOpBuilder.h"  // from @llvm-project
-#include "mlir/IR/Location.h"  // from @llvm-project
-#include "mlir/IR/PatternMatch.h"  // from @llvm-project
-#include "mlir/IR/Value.h"  // from @llvm-project
-#include "mlir/IR/ValueRange.h"  // from @llvm-project
-#include "mlir/Pass/Pass.h"  // from @llvm-project
-#include "mlir/Support/LogicalResult.h"  // from @llvm-project
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"  // from @llvm-project
+#include "llvm/Support/LogicalResult.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Complex/IR/Complex.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/ImplicitLocOpBuilder.h"
+#include "mlir/IR/Location.h"
+#include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Value.h"
+#include "mlir/IR/ValueRange.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Support/LLVM.h"
+#include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "xla/service/gpu/fusions/mlir/elemental_hlo_to_mlir.h"
 #include "xla/service/gpu/fusions/mlir/ir/xla_gpu_ops.h"
 #include "xla/service/gpu/ir_emission_utils.h"
+#include "xla/service/gpu/model/indexing_map.h"
 #include "xla/util.h"
 
 namespace xla {
 namespace gpu {
-
-#define GEN_PASS_DEF_LOWERXLAGPUTOSCFPASS
-#include "xla/service/gpu/fusions/mlir/passes.h.inc"
-
 namespace {
 
+#define GEN_PASS_DEF_LOWERXLAGPUTOSCFPASS
+#define GEN_PASS_DEF_LOWERXLAGPULOOPSTOSCFPASS
+#include "xla/service/gpu/fusions/mlir/passes.h.inc"
+
+using mlir::ImplicitLocOpBuilder;
+using mlir::Location;
+using mlir::OpBuilder;
+using mlir::SmallVector;
 using mlir::success;
+using mlir::Value;
+using mlir::ValueRange;
+using mlir::scf::IfOp;
 
 struct RewritePredicatedInsert : mlir::OpRewritePattern<PredicatedInsertOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -93,54 +107,82 @@ struct RewriteShuffleReduce : mlir::OpRewritePattern<ShuffleReduceOp> {
   mlir::LogicalResult matchAndRewrite(
       ShuffleReduceOp op, mlir::PatternRewriter& rewriter) const override {
     int max_distance =
-        op->getAttr("max_distance").cast<mlir::IntegerAttr>().getInt();
+        mlir::cast<mlir::IntegerAttr>(op->getAttr("max_distance")).getInt();
     // TODO(jreiffers): Do this in a verifier.
     if (max_distance & (max_distance - 1) || max_distance >= WarpSize()) {
       return op->emitOpError("max_distance must be a power of 2 < WarpSize()");
     }
 
-    mlir::ImplicitLocOpBuilder b(op.getLoc(), rewriter);
-    mlir::ValueRange values = op.getOperands();
+    ImplicitLocOpBuilder b(op.getLoc(), rewriter);
+    ValueRange values = op.getOperands();
     for (int distance = max_distance; distance > 0; distance /= 2) {
       namespace ml = mlir::LLVM;
-      auto shuffle = [&](mlir::Value v) {
+      auto shuffle_32 = [&](Value v) {
         return b
             .create<mlir::gpu::ShuffleOp>(v, distance, WarpSize(),
                                           mlir::gpu::ShuffleMode::DOWN)
             .getShuffleResult();
       };
 
-      llvm::SmallVector<mlir::Value> args = values;
-      for (auto value : values) {
-        // Shuffle within the warps.
+      auto shuffle_int_or_float = [&](Value value) {
         auto ty = value.getType();
         int bit_width = ty.getIntOrFloatBitWidth();
-
         if (bit_width == 32) {
-          value = shuffle(value);
-        } else {
-          int n_shuffles = CeilOfRatio(bit_width, 32);
-          auto int_ty = b.getIntegerType(bit_width);
-          auto padded_int_ty = b.getIntegerType(n_shuffles * 32);
-          value = b.create<mlir::arith::BitcastOp>(int_ty, value);
-          value = b.create<mlir::arith::ExtUIOp>(padded_int_ty, value);
+          return shuffle_32(value);
+        }
+        int n_shuffles = CeilOfRatio(bit_width, 32);
+        auto int_ty = b.getIntegerType(bit_width);
+        auto padded_int_ty = b.getIntegerType(n_shuffles * 32);
+        value = b.create<mlir::arith::BitcastOp>(int_ty, value);
+        value = b.create<mlir::arith::ExtUIOp>(padded_int_ty, value);
+        if (n_shuffles > 1) {
+          // Don't generate vectors if the size is 1.
           auto vector_type = ml::getVectorType(b.getI32Type(), n_shuffles);
           value = b.create<ml::BitcastOp>(vector_type, value);
-          mlir::Value result_vec = b.create<ml::UndefOp>(vector_type);
+          Value result_vec = b.create<ml::UndefOp>(vector_type);
           for (int i = 0; i < n_shuffles; ++i) {
             auto idx = b.create<mlir::arith::ConstantIntOp>(i, 32);
             result_vec = b.create<ml::InsertElementOp>(
-                result_vec, shuffle(b.create<ml::ExtractElementOp>(value, idx)),
-                idx);
+                result_vec,
+                shuffle_32(b.create<ml::ExtractElementOp>(value, idx)), idx);
           }
           value = b.create<ml::BitcastOp>(padded_int_ty, result_vec);
-          value = b.create<mlir::arith::TruncIOp>(int_ty, value);
-          value = b.create<mlir::arith::BitcastOp>(ty, value);
+        } else {
+          value = shuffle_32(value);
         }
-        args.push_back(value);
+        value = b.create<mlir::arith::TruncIOp>(int_ty, value);
+        value = b.create<ml::BitcastOp>(ty, value);
+        return value;
+      };
+
+      auto shuffle = [&](Value value) -> Value {
+        if (mlir::isa<mlir::ComplexType>(value.getType())) {
+          return b.create<mlir::complex::CreateOp>(
+              value.getType(),
+              shuffle_int_or_float(b.create<mlir::complex::ReOp>(value)),
+              shuffle_int_or_float(b.create<mlir::complex::ImOp>(value)));
+        }
+        if (value.getType().isUnsignedInteger()) {
+          auto ty = value.getType();
+          auto signless_ty = b.getIntegerType(ty.getIntOrFloatBitWidth());
+          value = b.create<mlir::UnrealizedConversionCastOp>(
+                       mlir::TypeRange{signless_ty}, value)
+                      .getResult(0);
+          value = shuffle_int_or_float(value);
+          value = b.create<mlir::UnrealizedConversionCastOp>(
+                       mlir::TypeRange{ty}, value)
+                      .getResult(0);
+          return value;
+        }
+        return shuffle_int_or_float(value);
+      };
+
+      SmallVector<Value> args = values;
+      for (auto value : values) {
+        args.push_back(shuffle(value));
       }
-      values = b.create<mlir::func::CallOp>(op.getReducerAttr().getAttr(),
-                                            op.getResultTypes(), args)
+      values = b.create<PureCallOp>(op.getResultTypes(),
+                                    op.getReducerAttr().getAttr(), args)
                    .getResults();
     }
     rewriter.replaceOp(op, values);
@@ -148,13 +190,73 @@ struct RewriteShuffleReduce : mlir::OpRewritePattern<ShuffleReduceOp> {
   }
 };
 
+struct RewriteXlaGpuLoop : mlir::OpRewritePattern<LoopOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  mlir::LogicalResult matchAndRewrite(
+      LoopOp op, mlir::PatternRewriter& rewriter) const override {
+    Location loc = op.getLoc();
+    ImplicitLocOpBuilder b(loc, rewriter);
+
+    IndexingMap indexing_map = op.getIndexingMap();
+    SmallVector<Value, 4> lbs, ubs, steps;
+    mlir_converter::GetLoopBoundsFromIndexingMap(b, indexing_map, &lbs, &ubs,
+                                                 &steps);
+    mlir::scf::LoopNest loop_nest = mlir::scf::buildLoopNest(
+        b, loc, lbs, ubs, steps, op.getInits(),
+        [&](OpBuilder& nested_builder, Location loc, ValueRange symbol_values,
+            ValueRange iter_args) -> mlir::scf::ValueVector {
+          mlir::ImplicitLocOpBuilder nested_b(loc, nested_builder);
+          auto is_in_bounds = mlir_converter::CheckConstraints(
+              indexing_map, op.getDims(), symbol_values, nested_b);
+          auto if_op = nested_b.create<mlir::scf::IfOp>(
+              is_in_bounds,
+              [&](OpBuilder& then_builder, Location then_loc) -> void {
+                SmallVector<Value, 4> bb_args(symbol_values);
+                bb_args.append(iter_args.begin(), iter_args.end());
+
+                mlir::Block* then_block = then_builder.getInsertionBlock();
+                OpBuilder::InsertionGuard guard(rewriter);
+                rewriter.setInsertionPointToStart(then_block);
+                rewriter.mergeBlocks(op.getBody(), then_block, bb_args);
+
+                auto old_terminator = then_block->getTerminator();
+                then_builder.create<mlir::scf::YieldOp>(
+                    then_loc, old_terminator->getOperands());
+                old_terminator->erase();
+              },
+              [&](OpBuilder& else_b, Location else_loc) {
+                else_b.create<mlir::scf::YieldOp>(loc, iter_args);
+              });
+          return if_op.getResults();
+        });
+    rewriter.replaceOp(op, loop_nest.results);
+    return mlir::success();
+  }
+};
+
 class LowerXlaGpuToScfPass
     : public impl::LowerXlaGpuToScfPassBase<LowerXlaGpuToScfPass> {
  public:
   void runOnOperation() override {
-    mlir::RewritePatternSet patterns(&getContext());
+    auto* ctx = &getContext();
+    mlir::RewritePatternSet patterns(ctx);
     patterns.add<RewritePredicatedInsert, RewritePredicatedExtract,
-                 RewriteShuffleReduce>(&getContext());
+                 RewriteShuffleReduce>(ctx);
+    if (mlir::failed(mlir::applyPatternsAndFoldGreedily(getOperation(),
+                                                        std::move(patterns)))) {
+      signalPassFailure();
+    }
+  }
+};
+
+class LowerXlaGpuLoopsToScfPass
+    : public impl::LowerXlaGpuLoopsToScfPassBase<LowerXlaGpuLoopsToScfPass> {
+ public:
+  void runOnOperation() override {
+    auto* ctx = &getContext();
+    mlir::RewritePatternSet patterns(ctx);
+    patterns.add<RewriteXlaGpuLoop>(ctx);
     if (mlir::failed(mlir::applyPatternsAndFoldGreedily(getOperation(),
                                                         std::move(patterns)))) {
       signalPassFailure();
@@ -166,6 +268,10 @@ class LowerXlaGpuToScfPass
 
 std::unique_ptr<::mlir::Pass> CreateLowerXlaGpuToScfPass() {
   return std::make_unique<LowerXlaGpuToScfPass>();
+}
+
+std::unique_ptr<::mlir::Pass> CreateLowerXlaGpuLoopsToScfPass() {
+  return std::make_unique<LowerXlaGpuLoopsToScfPass>();
 }
 
 }  // namespace gpu
