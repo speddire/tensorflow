@@ -1146,7 +1146,6 @@ cc_library(
         "//tensorflow/core:framework",
         "//tensorflow/core:portable_gif_internal",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/toco:toco_flags_proto_cc",
         "//tensorflow/lite/tools/versioning",
         "//tensorflow/lite/tools/versioning:gpu_compatibility",
@@ -1539,6 +1538,29 @@ cc_library(
     srcs = ["utils/string_utils.cc"],
     hdrs = ["utils/string_utils.h"],
     visibility = ["//tensorflow/lite:__pkg__"],
+)
+
+exports_files(srcs = ["allocation.h"])
+
+cc_library(
+    name = "allocation",
+    srcs = [
+        "allocation.cc",
+    ] + select({
+        ":tflite_mmap_disabled": [
+            "mmap_allocation_disabled.cc",
+        ],
+        "//conditions:default": [
+            "mmap_allocation.cc",
+        ],
+    }),
+    hdrs = [
+        "allocation.h",
+    ],
+    compatible_with = get_compatible_with_portable(),
+    copts = tflite_copts_warnings(),
+    visibility = ["//tensorflow/lite:__pkg__"],
+    deps = ["//tensorflow/compiler/mlir/lite/core/api:error_reporter"],
 )
 
 exports_files(srcs = ["utils/control_edges.h"])
